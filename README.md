@@ -24,7 +24,7 @@ To check that they can ping back and forth install the programs
 Next on one container run
 
 ```bash
-nc -l <IP-of-other-container> 444
+nc -l 444
 ```
 
 Then on the other container run
