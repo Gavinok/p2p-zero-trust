@@ -1,28 +1,27 @@
 version: "3"
 
 services:
-    peer1:
-        build: ./peer1
-        image: peer1
-        container_name: peer1-10.9.0.5
-        tty: true
-        networks:
-            net-10.9.0.0:
-                ipv4_address: 10.9.0.5
+  peer1:
+    build: ./peer1
+    image: peer1-image
+    container_name: peer1-10.9.0.5
+    tty: true
+    networks:
+      net-10.9.0.0:
+        ipv4_address: 10.9.0.5
 
-    peer2:
-        build: ./peer2
-        image: peer2-image
-        container_name: peer2-10.9.0.6
-        tty: true
-        networks:
-            net-10.9.0.0:
-                ipv4_address: 10.9.0.6
+  peer2:
+    build: ./peer2
+    image: peer2-image
+    container_name: peer2-10.9.0.6
+    tty: true
+    networks:
+      net-10.9.0.0:
+        ipv4_address: 10.9.0.6
 
 networks:
-    net-10.9.0.0:
-        name: net-10.9.0.0
-        ipam:
-            config:
-                - subnet: 10.9.0.0/24
-
+  net-10.9.0.0:
+    name: net-10.9.0.0
+    ipam:
+      config:
+        - subnet: 10.9.0.0/24
