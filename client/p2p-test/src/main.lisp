@@ -3,37 +3,8 @@
 (in-package :p2p)
 (defvar *IP* "")
 
-(defun create-server (ip port chan)
-  (let* ((socket (usocket:socket-listen ip port))
-	 (connection (usocket:socket-accept socket :element-type 'character)))
-    (unwind-protect
-         (progn
-           (loop
-             (progn
-               (format (usocket:socket-stream connection) (read-line))
-               (force-output (usocket:socket-stream connection)))))
-      (progn
-        (chanl:send chan (format nil "Closing sockets~%"))
-        (usocket:socket-close connection)
-        (usocket:socket-close socket)))))
-
-(defun create-client (ip port chan)
-  (usocket:with-client-socket
-      (socket stream ip port :element-type 'character)
-    (unwind-protect
-         (progn
-           (usocket:wait-for-input socket)
-           (chanl:send chan (format nil "Input is: ~a~%" (read-line stream))))
-      (usocket:socket-close socket))))
-
-(defun printer (chan)
-  (print (chanl:recv chan)))
-
-(defvar *server* nil)
-(defvar *printer* nil)
-
 (defun listener ()
-  (defparameter *socket* (usocket:socket-listen "localhost" 9002))
+  (defparameter *socket* (usocket:socket-listen "localhost" 9000))
   (defparameter *connection* (usocket:socket-accept *socket* :element-type 'character))
   (unwind-protect
        (loop
