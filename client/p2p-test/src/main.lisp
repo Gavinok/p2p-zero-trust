@@ -1,43 +1,88 @@
 (defpackage p2p
   (:use :cl))
 (in-package :p2p)
-(defvar *IP* "")
 
-(defun listener ()
-  (defparameter *socket* (usocket:socket-listen "localhost" 9000))
-  (defparameter *connection* (usocket:socket-accept *socket* :element-type 'character))
-  (unwind-protect
-       (loop
-         :with *socket-stream* := (usocket:socket-stream *connection*)
-         :while (listen *socket-stream*)
-         :do (progn (write-char (read-char *socket-stream*))
-                    (force-output)))
+(defun ip-p (ip)
+  "If IP is not a valid IP address return nil"
+  (or (string= ip "localhost")
+      (find #\. ip)))
 
-    ;; Make sure that the sockets get's closed no matter what
-    (progn (usocket:socket-close *connection*)
-           (usocket:socket-close *socket*))))
+;; Type definition for what is and is not an IP address
+(deftype Ip ()
+  `(satisfies ip-p))
 
-(defun sender ()
-  (defparameter *socket* (usocket:socket-connect "10.9.0.6" 9000))
-  (unwind-protect
-       (progn
-         (defparameter *socket-stream* (usocket:socket-stream *socket*))
-         (defun write-and-flush (message)
-           (when (open-stream-p *socket-stream*)
-             (write-string message *socket-stream*)
-             (force-output *socket-stream*)))
-         (loop
-           (write-and-flush (format nil "hello~%"))
-           (sleep 3)))
+(defvar *IP* "localhost")
+(defvar *PORT* 9000)
 
-    ;; Make sure that the socket get's closed no matter what
-    (usocket:socket-close *socket*)))
+(defun write-and-flush (message stream)
+  "Write MESSAGE to STREAM and force the output rather than buffering."
+  (when (open-stream-p stream)
+    (write-string message stream)
+    (force-output stream)))
 
-(defun main- (ip &optional port) (check-type ip string "IP addresse")
-  (let ((p (or port 9040))
-        (chan (make-instance 'chanl:channel)))
-    ;; Start the server on a different thread
-    (setf *server* (bt:make-thread (lambda () (create-client ip p chan))))
-    (setf *printer* (bt:make-thread (lambda () (printer chan))))
-    (create-server ip p chan)))
-;; blah blah blah.
+(defun tcp-request-handler (stream)
+  "Function called when processing input from a TCP socket."
+  (loop
+    :while (listen stream)
+    :do (progn (write-char (read-char stream))
+               (force-output))))
+
+(defun listener (ip port &optional (in-new-thread nil))
+  "Server started for handling incoming TCP requests from IP on PORT"
+  (defparameter *listener-thread*
+    (usocket:socket-server ip port
+                           #'tcp-request-handler nil
+                           :element-type 'character
+                           :in-new-thread in-new-thread)))
+
+(defun sender (ip port)
+  "Client who will send a TCP packet to the server at IP listing on PORT every 10 seconds
+PREREQUISIT: Server must be running before client is started"
+  (loop :repeat 10
+        :do (progn
+              (usocket:with-client-socket (s stream ip port
+                                             :element-type 'character)
+                (write-and-flush
+                 (format nil "hello~%") stream)
+                (sleep 3)))))
+
+(defun client (ip &optional (port *port*))
+  "Basic client for protocol which will send TCP packets to IP on PORT"
+  (sender ip port))
+
+(defun server (ip &optional (port *port*))
+  "Basic server that will handle TCP requests on IP on PORT"
+  (listener ip port))
+
+(defun maybe-help (args)
+  (when (member "-h" args
+                :test #'string=)
+    (format t "command {ip-address} [-p port-number]
+command -h
+
+   -h prints this help message
+   -p sets the current port number (defaults to 9000)")
+    (uiop:quit)))
+
+(defun main- ()
+  "Function ran at executable startup"
+
+  ;; Print help message if the -h cli argument was passed to the
+  ;; program
+  (maybe-help (uiop:command-line-arguments))
+
+  (let* ((args     (uiop:command-line-arguments))
+         (endpoint (first args))
+         (ip       (second args))
+         (port     (when (member "-p" args :test #'string=)
+                     (parse-integer (car (last args))))))
+
+    (check-type ip Ip "IP address")
+    (check-type port Integer "Port must be an integer")
+
+    (format t "~a ~a ~a~%" endpoint ip port)
+
+    (cond
+      ((string= endpoint "client") (client ip port))
+      ((string= endpoint "server") (server ip port))
+      (t (error "Endpoint must be either 'client' or 'server' ~a is invalid" endpoint)))))
