@@ -1,5 +1,20 @@
 # Setup
 
+First build the project
+
+Ensure you have https://github.com/roswell/roswell installed and the `ros` executable in your path
+
+Then you can build the project by running
+
+```bash
+make
+```
+
+This will compile the executable in `client/p2p-test/p2p` and
+copy it into the `peer1` and `peer1` directories.
+
+Next you can run the following commands to start the containers
+
 ```bash
 docker-compose build
 docker-compose up
@@ -14,24 +29,23 @@ NOTE that each container has it's IP appended to it's name
 Then to connect to a container run
 
 ```bash
-docker exec -it <containerID> /bin/bash
+docker exec -it <containerID> bash
 ```
-
-To check that they can ping back and forth install the programs
-`curl`, and `netcat` on both containers.
-
 
 Next on one container run
 
 ```bash
-nc -l 444
+./p2p server <IP-OF-THIS-CONTAINER> -p 9000
 ```
 
 Then on the other container run
 
 ```bash
-curl -X "Yooooo" <IP-of-other-container>:444
+./p2p client <IP-OF-OTHER-CONTAINER> -p 9000
 ```
 
-You should see a message appear on the first container running netcat
-with the corresponding HTTP request.
+You should see the container running the server begin to print
+`hello`.
+
+Long term we will have these run from the start but for now this makes
+debugging much easier.

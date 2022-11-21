@@ -38,7 +38,7 @@
 (defun sender (ip port)
   "Client who will send a TCP packet to the server at IP listing on PORT every 10 seconds
 PREREQUISIT: Server must be running before client is started"
-  (loop :repeat 10
+  (loop :repeat 10000
         :do (progn
               (usocket:with-client-socket (s stream ip port
                                              :element-type 'character)
