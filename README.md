@@ -49,3 +49,11 @@ You should see the container running the server begin to print
 
 Long term we will have these run from the start but for now this makes
 debugging much easier.
+
+
+## Cleanup
+
+If you want to wipe all the p2p executable run 
+```bash
+make clean
+```
