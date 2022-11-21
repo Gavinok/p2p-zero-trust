@@ -1,5 +1,40 @@
-* P2p 
+* P2P
 
 ** Usage
+#+begin_src 
+command {endpoint} {ip-address} [-p port-number]
+command -h
 
+   -h prints this help message
+   -p sets the current port number (defaults to 9000)  
+#+end_src
+If you want to run the client then set the endpoint to `client` and if
+you want the server then set the end point to `server`
+
+#+begin_src bash
+  ./p2p server localhost -p 90000
+#+end_src
+
+#+begin_src bash
+  ./p2p client localhost -p 90000
+#+end_src
+
+for non local host
+#+begin_src bash
+  ./p2p server 10.9.0.5 -p 9000
+#+end_src
+#+begin_src bash
+  ./p2p client 10.9.0.5 -p 9000
+#+end_src
 ** Installation
+After installing [[https://github.com/roswell/roswell][Roswell]] you can run the following command in order to
+build this project. 
+#+begin_src bash
+  ros run -S . -l ./p2p.asd \
+      -e '(ql:quickload :p2p)' \
+      -e '(asdf:make :p2p)'
+#+end_src
+
+Alternatively go to the root of the entire project
+(the one with the docker-compose.yaml file) and follow the steps in
+the README

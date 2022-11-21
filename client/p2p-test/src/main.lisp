@@ -57,7 +57,7 @@ PREREQUISIT: Server must be running before client is started"
 (defun maybe-help (args)
   (when (member "-h" args
                 :test #'string=)
-    (format t "command {ip-address} [-p port-number]
+    (format t "command {endpoint} {ip-address} [-p port-number]
 command -h
 
    -h prints this help message
