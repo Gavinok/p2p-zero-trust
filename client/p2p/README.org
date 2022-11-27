@@ -1,0 +1,53 @@
+* Install
+
+** Dependencies
+
+- ghc   9.2.4   
+- cabal 3.6.2.0 
+- hls   1.8.0.0 
+
+All of which can be installed with ~ghcup~ with the following commands
+
+#+begin_src bash
+ghcup install ghc   1.8.0
+ghcup install cabal 3.6.2.0
+ghcup install hls   1.8.0.0
+#+end_src
+
+#+begin_src bash
+cabal build p2p
+#+end_src
+
+** Build
+
+#+begin_src bash
+cabal build p2p
+#+end_src
+
+show path to executable
+#+begin_src bash
+cabal list-bin p2p
+#+end_src
+
+* Running it
+If you want to run the client then set the endpoint to `client` and if
+you want the server then set the end point to `server`
+
+#+begin_src bash
+  ./p2p server localhost -p 90000
+#+end_src
+
+#+begin_src bash
+  ./p2p client localhost -p 90000
+#+end_src
+
+for non local host
+#+begin_src bash
+  ./p2p server 10.9.0.5 -p 9000
+#+end_src
+#+begin_src bash
+  ./p2p client 10.9.0.5 -p 9000
+#+end_src
+
+
+
