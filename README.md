@@ -1,8 +1,22 @@
 # Setup
 
+NOTE: THE Project Nolonger Uses Lisp And Is Now Haskell This
+documentation is out of sync
+
 First build the project
 
-Ensure you have https://github.com/roswell/roswell installed and the `ros` executable in your path
+~~Ensure you have https://github.com/roswell/roswell installed and the `ros` executable in your path~~
+
+The project is now Haskell based so the best option is to install
+ghcup to manage GHC (The Haskell Compiler) versions
+
+After installing ghcup run the following 
+
+```bash
+ghcup install ghc   1.8.0
+ghcup install cabal 3.6.2.0
+ghcup install hls   1.8.0.0
+```
 
 Then you can build the project by running
 
