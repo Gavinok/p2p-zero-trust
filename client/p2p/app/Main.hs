@@ -121,91 +121,141 @@ awaitForAes priv soc confirmationmessage = do
                    pure $ Just aesBytes
 
 data ServerState = Echo
+                 | WaitForConnection
                  | ServerError String
-                 | AwaitPublicKey ByteString
-                 | AwaitSharedAES
-                 | SendRandomNumber PublicKey AESKeyBytes
-                 | AwaitRandomNumber AESKeyBytes ByteString
-                 | AESEcho AESKeyBytes
-                 -- abandoned
-                 | AwaitAESEcryptedMessage AESKeyBytes
-                 | Send2ndAESKey PublicKey
-mainServerDispatch :: Socket -> PrivateKey -> ServerState -> IO ServerState
-mainServerDispatch s priv state = case state of
+
+data ServerModel = ServerModel { priv :: PrivateKey
+                               , s :: Socket
+                               }
+
+data EncryptionMethod = NoEncryption
+                      | AES (Maybe AESKeyBytes)
+                      | OneWayRSA
+                      | TwoWayRSA
+
+currentHandshake :: EncryptionMethod
+currentHandshake = TwoWayRSA
+
+serverHandshake :: ServerModel -> EncryptionMethod -> IO ServerState
+serverHandshake model NoEncryption  = do
+  msg <- recv (s model) maxPacketSize
+  sendAll (s model) msg
+  pure Echo
+serverHandshake model OneWayRSA = echoOneWayEncrypt model
+serverHandshake model TwoWayRSA = echoTwoWayEncrypt model
+serverHandshake model (AES _)  = awaitSharedAES model
+
+clientHandshake :: ClientModel -> EncryptionMethod -> IO ClientState
+clientHandshake model NoEncryption  = sendHello model NoEncryption
+clientHandshake model OneWayRSA = sendHello model OneWayRSA
+clientHandshake model TwoWayRSA = do
+  sendAll (soc model) $ serialize (fst (clientKeys model))
+  sendHello model TwoWayRSA
+clientHandshake model (AES k)  = sendUsingAES model
+
+
+-- Final
+awaitSharedAES :: ServerModel -> IO ServerState
+awaitSharedAES model = do
+                 maybeAES <- awaitForAes (priv model) (s model) "AES is working"
+                 case maybeAES of
+                   Nothing -> pure $ ServerError "Failed to decrypt the aes key"
+                   Just aesKey -> awaitPublicKey model aesKey
+
+awaitPublicKey :: ServerModel -> ByteString -> IO ServerState
+awaitPublicKey model aesKey = do
+                 cpub <- recv (s model) maxPacketSize
+                 print "We got the clients public key"
+                 C.putStrLn cpub
+                 fullPub <- aesDecrypt aesKey cpub
+                 let truPub = deserialize fullPub
+                 print "decryption ran"
+                 sendRandomNumber model truPub aesKey
+
+sendRandomNumber :: ServerModel -> PublicKey -> ByteString -> IO ServerState
+sendRandomNumber model cpub aesKey = do
+                 print "sending random number"
+                 cyphertext <- myencrypt cpub "hello"
+                 sendAll (s model) cyphertext
+                 print "Random Number Sent"
+                 awaitRandomNumber model aesKey "hello"
+
+awaitRandomNumber :: ServerModel -> ByteString -> ByteString -> IO ServerState
+awaitRandomNumber model aesKey ognum = do
+                 em <- recv (s model) maxPacketSize
+                 msg <- decryptSafer (priv model) em
+                 case msg of
+                   Left e -> pure $ ServerError (show e)
+                   Right randnum -> do
+                                    C.putStrLn $ "Received Random Number: " <> randnum
+                                    if randnum == ognum then
+                                        do putStrLn "numbers did match"
+                                           aESEcho model aesKey
+                                    else do putStrLn "numbers did NOT match"
+                                            pure $ ServerError "Random numbers did not match"
+
+aESEcho :: ServerModel -> ByteString -> IO ServerState
+aESEcho model aesKey = do
+                 em <- recv (s model) maxPacketSize
+                 msg <- aesDecrypt aesKey em
+                 (_, ivbuf) <- keys
+                 cyphertext <- aesEncrypt aesKey ivbuf msg
+                 sendAll (s model) cyphertext
+                 aESEcho model aesKey
+-- Initial
+-- Nothing needed since Echo works out of the box
+-- One Way RSA
+echoOneWayEncrypt model = do
+                 ehello <- recv (s model) maxPacketSize
+                 dhello <- decryptSafer (priv model) ehello
+                 case dhello of
+                   Left e -> pure $ ServerError (show e)
+                   Right hello -> do
+                               sendAll (s model) hello
+                               echoOneWayEncrypt model
+-- Two Way RSA
+echoTwoWayEncrypt model = do
+                 -- Wait for the client to provide thier public key
+                 scpub <- recv (s model) maxPacketSize
+                 let cpub = deserialize scpub
+                 echoWithCpub cpub
+                 where echoWithCpub cpub = do
+                            ehello <- recv (s model) maxPacketSize
+                            dhello <- decryptSafer (priv model) ehello
+                            case dhello of
+                              Left e -> pure $ ServerError (show e)
+                              Right hello -> do
+                                          newehello <- myencrypt cpub hello
+                                          sendAll (s model) newehello
+                                          echoWithCpub cpub
+
+
+mainServerDispatch :: ServerModel -> ServerState -> IO ServerState
+mainServerDispatch m state = case state of
                               ServerError e -> do print e
                                                   pure $ ServerError e
-                              Echo -> do
-                                     msg <- recv s maxPacketSize
-                                     decr <- decryptSafer priv msg
+                              WaitForConnection -> do
+                                     msg <- recv (s m) maxPacketSize
+                                     decr <- decryptSafer (priv m) msg
                                      case decr of
                                        Left _ -> pure $ ServerError "Failed to decrypt"
                                        Right r -> case C.unpack r of
                                                     "Connect?" -> do
-                                                      sendAll s "YES"
+                                                      sendAll (s m) "YES"
                                                       print "now connected"
-                                                      pure AwaitSharedAES
-                                                    _ -> do
-                                                      sendAll s r
-                                                      pure Echo
-                              AwaitSharedAES -> do
-                                               maybeAES <- awaitForAes priv s "AES is working"
-                                               case maybeAES of
-                                                 Nothing -> pure $ ServerError "Failed to decrypt the aes key"
-                                                 Just aesKey -> pure $ AwaitPublicKey aesKey
+                                                      serverHandshake m currentHandshake
+                                                    _ -> pure $ ServerError "Failed to connect"
+                              Echo -> do
+                                msg <- recv (s m) maxPacketSize
+                                sendAll (s m) msg
+                                pure Echo
 
-                              AwaitPublicKey aesKey -> do
-                                               cpub <- recv s maxPacketSize
-                                               print "We got the clients public key"
-                                               C.putStrLn cpub
-                                               fullPub <- aesDecrypt aesKey cpub
-                                               let truPub = deserialize fullPub
-                                               print "decryption ran"
-                                               pure $ SendRandomNumber truPub aesKey
-                              SendRandomNumber cpub aesKey -> do
-                                               print "sending random number"
-                                               cyphertext <- myencrypt cpub "hello"
-                                               sendAll s cyphertext
-                                               print "Random Number Sent"
-                                               pure $ AwaitRandomNumber aesKey "hello"
-                              AwaitRandomNumber aesKey ognum -> do
-                                               em <- recv s maxPacketSize
-                                               msg <- decryptSafer priv em
-                                               case msg of
-                                                 Left e -> pure $ ServerError (show e)
-                                                 Right randnum -> do
-                                                                  C.putStrLn $ "Received Random Number: " <> randnum
-                                                                  if randnum == ognum then
-                                                                      do putStrLn "numbers did match"
-                                                                         pure $ AESEcho aesKey
-                                                                  else do putStrLn "numbers did NOT match"
-                                                                          pure $ ServerError "Random numbers did not match"
-                              AESEcho aesKey -> do
-                                               em <- recv s maxPacketSize
-                                               msg <- aesDecrypt aesKey em
-                                               (_, ivbuf) <- keys
-                                               cyphertext <- aesEncrypt aesKey ivbuf msg
-                                               sendAll s cyphertext
-                                               pure $ AESEcho aesKey
-
-                              -- Abandoned Path
-                              AwaitAESEcryptedMessage aesKey -> do
-                                               em <- recv s maxPacketSize
-                                               msg <- aesDecrypt aesKey em
-                                               C.putStrLn $ "Received: " <> msg
-                                               pure $ ServerError "AwaitAESEcryptedMessage is abandonned"
-                              Send2ndAESKey  cpub -> do
-                                               print "Sending 2nd AES now"
-                                               aesKey <- genAndSendAESKey s cpub
-                                               pure $ ServerError "Send2ndAESKey is abandonned"
-
-
-
-serverDispatcher :: Socket -> PrivateKey -> ServerState -> IO ServerState
-serverDispatcher s priv state = do
-  result <- mainServerDispatch s priv state
+serverDispatcher :: ServerModel -> ServerState -> IO ServerState
+serverDispatcher m state = do
+  result <- mainServerDispatch m state
   case result of
     ServerError e -> pure $ ServerError e
-    _ -> serverDispatcher s priv result
+    _ -> serverDispatcher m result
 
 -- Server iterface which will use the public key of the client to
 -- encrypt a message in this case "hello"
@@ -215,7 +265,9 @@ mainServer port priv =  do
   runTCPServer Nothing port talk
       where
         talk s = do
-          res <- serverDispatcher s priv Echo
+          res <- serverDispatcher ServerModel{ s = s
+                                             , priv = priv}
+                 WaitForConnection
           case res of
             Echo -> putStrLn "impossible"
             ServerError e -> print e
@@ -241,14 +293,13 @@ server keyPort connectionPort = do
 -- --------------------------- Client Code ----------------------------------------
 type AESKeyBytes = ByteString
 
+
 data ClientState =
                  Fail String
-                 -- | Recieve2ndAESKey AESKeyBytes -- abandoned path
                  | ConnectionRequest
                  | SendSharedAES
-                 | SendAESHello AESKeyBytes
                  -- No encryption send
-                 | SendHello
+                 | SendHello EncryptionMethod
 
 data ClientModel = ClientModel { clientKeys :: (PublicKey, PrivateKey)
                                , serverKey :: PublicKey
@@ -272,7 +323,9 @@ clientDispatcher m state = do
                                     , lastTime = ts}
                            result
 
-    SendAESHello aeskey -> do
+    SendHello meth -> waitAndRunAgain result
+    _ -> clientDispatcher m result
+    where waitAndRunAgain result = do
                 te <- getCPUTime
                 let diff = fromIntegral (te  - lastTime m) / (10^10)
                 _ <- printf "Computation took: %0.3f msec\n" (diff :: Double)
@@ -283,65 +336,7 @@ clientDispatcher m state = do
                                             , soc = soc m
                                             , lastTime = ts}
                            result
-    SendHello -> do
-                te <- getCPUTime
-                putStrLn $ "Ending timer at" ++ show te
-                threadDelay 3000000
-                ts <- getCPUTime
-                putStrLn $ "Starting timer at" ++ show ts
-                clientDispatcher m result
-    _ -> clientDispatcher m result
-
---  No Encyr Public Key Iteration
---  Exposed Public Key Iteration
-sendUnencryptedPublicKey :: ClientModel -> IO ClientState
-sendUnencryptedPublicKey model = do
-  print "sending message"
-  sendAll (soc model) $ serialize $ serverKey model
-  pure SendHello
-
-sendPublicKeyEncryptedHello :: ClientModel -> IO ClientState
-sendPublicKeyEncryptedHello model = do
-  print "sending message"
-  sendAll (soc model) $ serialize $ serverKey model
-  pure SendHello
--- Initial Iteration
-sendPlainHello :: ClientModel -> IO ClientState
-sendPlainHello model = do
-  sendAll (soc model)  "hello"
-  em <- recv (soc model) maxPacketSize
-  C.putStrLn $ "Received: " <> em
-  pure SendHello
-
--- Public key iteration 1
-sendPublicKeyHello :: ClientModel -> IO ClientState
-sendPublicKeyHello model = do
-  emsg <- myencrypt (serverKey model) "hello"
-  sendAll (soc model) emsg
-  pure SendHello
-
--- Public key iteration 2
--- sendMutualPublicKeyHello :: ClientModel -> IO ClientState
--- sendMutualPublicKeyHello model = do
---   print "sending message"
---   -- Send my public key
---   sendAll (soc model) (serialize (fst (clientKeys model)))
---   -- Send hello encrypted with server public key
---   emsg <- myencrypt (serverKey model) aesKey
---   sendAll socket emsg
---   sendAll (soc model) (serialize (fst (clientKeys model))
---   pure SendHello
-
 -- Final iteration
-sendUsingAES :: ClientModel -> IO ClientState
-sendUsingAES model = do
-  aesKey <- genAndSendAESKey (soc model) (serverKey model)
-  _ <- receiveAESEcryptedMessage model aesKey
-  sendPublicKeyWithAES model aesKey
-  msg <- recieveRandomNumber model
-  echoRandomNumber model msg
-  pure $ SendAESHello aesKey
-
 receiveAESEcryptedMessage :: ClientModel -> ByteString -> IO Plaintext
 receiveAESEcryptedMessage model aesKey = do
   em <- recv (soc model) maxPacketSize
@@ -364,7 +359,7 @@ recieveRandomNumber model = do
     Left e -> undefined
     Right msg -> do
       C.putStrLn $ "Received Random Number: " <> msg
-      pure $ msg
+      pure msg
 
 echoRandomNumber :: ClientModel -> Plaintext -> IO ()
 echoRandomNumber model randnum = do
@@ -372,26 +367,63 @@ echoRandomNumber model randnum = do
   sendAll (soc model) cyphertext
   pure ()
 
-sendAESHello :: ClientModel -> ByteString -> IO ClientState
-sendAESHello model aesKey = do
+sendUsingAES :: ClientModel -> IO ClientState
+sendUsingAES model = do
+  aesKey <- genAndSendAESKey (soc model) (serverKey model)
+  _ <- receiveAESEcryptedMessage model aesKey
+  sendPublicKeyWithAES model aesKey
+  msg <- recieveRandomNumber model
+  echoRandomNumber model msg
+  pure $ SendHello $ AES (Just aesKey)
+
+sendHello :: ClientModel -> EncryptionMethod -> IO ClientState
+sendHello model (AES (Just aesKey)) = do
   (_, ivbuf) <- keys
   cyphertext <- aesEncrypt aesKey ivbuf "hello"
   sendAll (soc model) cyphertext
   em <- recv (soc model) maxPacketSize
   msg <- aesDecrypt aesKey em
   C.putStrLn $ "Received: " <> msg
-  pure $ SendAESHello aesKey
+  pure $ SendHello (AES (Just aesKey))
 
+sendHello model (AES Nothing) = do
+  putStrLn "Must have AES to echo"
+  pure $ Fail "Must have AES to echo"
 
-sharedAESImplementaiont :: [ClientState]
-sharedAESImplementaiont = [ConnectionRequest , SendSharedAES]
+-- Initial Iteration
+sendHello model NoEncryption = do
+  sendAll (soc model)  "hello"
+  em <- recv (soc model) maxPacketSize
+  C.putStrLn $ "Received: " <> em
+  pure $ SendHello NoEncryption
+
+-- Public key iteration 1
+sendHello model OneWayRSA = do
+  emsg <- myencrypt (serverKey model) "hello"
+  sendAll (soc model) emsg
+  em <- recv (soc model) maxPacketSize
+  C.putStrLn $ "Received: " <> em
+  pure $ SendHello OneWayRSA
+
+-- Public key iteration 2
+sendHello model TwoWayRSA = do
+  print "sending message"
+ -- Send my public key
+  emsg <- myencrypt (serverKey model) "hello"
+  sendAll (soc model) emsg
+  em <- recv (soc model) maxPacketSize
+  attemptedDecryption <- decryptSafer (snd (clientKeys model)) em
+  case attemptedDecryption of
+    Left e -> pure $ Fail (show e)
+    Right m -> do
+      C.putStrLn $ "Received: " <> m
+      pure $ SendHello TwoWayRSA
 
 clientDispatch :: ClientModel -> ClientState -> IO ClientState
 clientDispatch model cs = case cs of
-                      Fail s -> do
-                          print s
-                          pure $ Fail s
-
+                      Fail errorMsg -> do
+                          print errorMsg
+                          pure $ Fail errorMsg
                       ConnectionRequest -> do
                         e <- myencrypt (serverKey model) "Connect?"
                         sendAll (soc model) e
@@ -399,14 +431,12 @@ clientDispatch model cs = case cs of
                         case confirmation of
                           "YES" -> do
                             putStrLn "Connected at last"
-                            sendUsingAES model
+                            clientHandshake model currentHandshake
                           _ -> pure $ Fail "Failed To Get Confirmation"
 
                       SendSharedAES -> sendUsingAES model
 
-                      SendAESHello aesKey -> sendAESHello model aesKey
-
-                      SendHello -> sendPlainHello model
+                      SendHello meth -> sendHello model meth
 
 
 client :: HostName -> ServiceName -> IO ()
