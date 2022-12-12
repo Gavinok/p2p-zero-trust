@@ -1,11 +1,31 @@
 module Main where
 
 -- Echo server program
-import Control.Concurrent (forkFinally, threadDelay, forkIO, ThreadId)
+import Control.Concurrent (forkFinally, threadDelay, forkIO)
 import qualified Control.Exception as E
 import Control.Monad (unless, forever, void)
 import qualified Data.ByteString as S
 import Network.Socket
+    ( setCloseOnExecIfNeeded,
+      defaultHints,
+      getAddrInfo,
+      openSocket,
+      withSocketsDo,
+      setSocketOption,
+      gracefulClose,
+      accept,
+      bind,
+      connect,
+      listen,
+      close,
+      withFdSocket,
+      AddrInfo(addrAddress, addrFlags, addrSocketType),
+      AddrInfoFlag(AI_PASSIVE),
+      HostName,
+      ServiceName,
+      SocketOption(ReuseAddr),
+      Socket,
+      SocketType(Stream) )
 import qualified Data.ByteString.Char8 as C
 import Network.Socket.ByteString (recv, sendAll)
 
@@ -15,30 +35,35 @@ import Crypto.PubKey.RSA.PKCS15 as PKCS15
 import qualified Crypto.Data.Padding as PAD
 
 -- AES Encryption
-import Crypto.Cipher.AES as AES
-import Crypto.Cipher.AES (AES256)
-import Crypto.Cipher.Types (BlockCipher(..), Cipher(..), nullIV, KeySizeSpecifier(..), IV, makeIV, cipherInit, )
+import Crypto.Cipher.AES as AES ( AES256 )
+import Crypto.Cipher.Types (BlockCipher(..), Cipher(..), IV, makeIV, cipherInit, )
 import Crypto.Random.Types (getRandomBytes)
-import Crypto.Error (CryptoFailable(..), CryptoError(..), throwCryptoErrorIO)
+import Crypto.Error (throwCryptoErrorIO)
 
-import System.Environment
-import System.Exit
+import System.Environment ( getArgs )
+import System.Exit ( exitFailure, exitSuccess )
 import Crypto.Random (MonadRandom)
 import Data.ByteString (ByteString)
-import Data.ByteArray (ByteArray, convert)
 import Data.Maybe (fromMaybe)
 import System.CPUTime (getCPUTime)
 import Text.Printf (printf)
 
+maxPacketSize :: Int
 maxPacketSize = 1024 * 7
 
+fallbackPort :: ServiceName
 fallbackPort = "9000"
+
+kport :: ServiceName
 kport = "9001"
 
 size :: Int
 size = 512
 expt :: Integer
 expt = 65537
+
+currentHandshake :: EncryptionMethod
+currentHandshake = OneWayRSA
 
 type Plaintext = ByteString
 type Ciphertext = ByteString
@@ -47,8 +72,6 @@ type AESEncryptionKey = ByteString
 genRandomBytes :: forall m c a. (MonadRandom m) => Int -> m ByteString
 genRandomBytes size = do
   getRandomBytes size
-
--- tmp :: forall m c a. (MonadRandom m, BlockCipher c) => c -> (Maybe (IV AES256))
 
 initAES256 :: ByteString -> IO AES256
 initAES256 = throwCryptoErrorIO . cipherInit
@@ -106,7 +129,6 @@ genAndSendAESKey socket recipientPubKey = do
 awaitForAes :: PrivateKey -> Socket -> Plaintext -> IO (Maybe ByteString)
 awaitForAes priv soc confirmationmessage = do
   encryptedAesBytes <- recv soc maxPacketSize
-  print "We got something boys"
   attemptedDecytpiton <- decryptSafer priv encryptedAesBytes
   case attemptedDecytpiton of
     Left e -> do
@@ -133,14 +155,12 @@ data EncryptionMethod = NoEncryption
                       | OneWayRSA
                       | TwoWayRSA
 
-currentHandshake :: EncryptionMethod
-currentHandshake = TwoWayRSA
-
 serverHandshake :: ServerModel -> EncryptionMethod -> IO ServerState
 serverHandshake model NoEncryption  = do
   msg <- recv (s model) maxPacketSize
   sendAll (s model) msg
   pure Echo
+
 serverHandshake model OneWayRSA = echoOneWayEncrypt model
 serverHandshake model TwoWayRSA = echoTwoWayEncrypt model
 serverHandshake model (AES _)  = awaitSharedAES model
@@ -151,7 +171,7 @@ clientHandshake model OneWayRSA = sendHello model OneWayRSA
 clientHandshake model TwoWayRSA = do
   sendAll (soc model) $ serialize (fst (clientKeys model))
   sendHello model TwoWayRSA
-clientHandshake model (AES k)  = sendUsingAES model
+clientHandshake model (AES _)  = sendUsingAES model
 
 
 -- Final
@@ -165,19 +185,15 @@ awaitSharedAES model = do
 awaitPublicKey :: ServerModel -> ByteString -> IO ServerState
 awaitPublicKey model aesKey = do
                  cpub <- recv (s model) maxPacketSize
-                 print "We got the clients public key"
                  C.putStrLn cpub
                  fullPub <- aesDecrypt aesKey cpub
                  let truPub = deserialize fullPub
-                 print "decryption ran"
                  sendRandomNumber model truPub aesKey
 
 sendRandomNumber :: ServerModel -> PublicKey -> ByteString -> IO ServerState
 sendRandomNumber model cpub aesKey = do
-                 print "sending random number"
                  cyphertext <- myencrypt cpub "hello"
                  sendAll (s model) cyphertext
-                 print "Random Number Sent"
                  awaitRandomNumber model aesKey "hello"
 
 awaitRandomNumber :: ServerModel -> ByteString -> ByteString -> IO ServerState
@@ -205,6 +221,7 @@ aESEcho model aesKey = do
 -- Initial
 -- Nothing needed since Echo works out of the box
 -- One Way RSA
+echoOneWayEncrypt :: ServerModel -> IO ServerState
 echoOneWayEncrypt model = do
                  ehello <- recv (s model) maxPacketSize
                  dhello <- decryptSafer (priv model) ehello
@@ -214,6 +231,7 @@ echoOneWayEncrypt model = do
                                sendAll (s model) hello
                                echoOneWayEncrypt model
 -- Two Way RSA
+echoTwoWayEncrypt :: ServerModel -> IO ServerState
 echoTwoWayEncrypt model = do
                  -- Wait for the client to provide thier public key
                  scpub <- recv (s model) maxPacketSize
@@ -242,7 +260,6 @@ mainServerDispatch m state = case state of
                                        Right r -> case C.unpack r of
                                                     "Connect?" -> do
                                                       sendAll (s m) "YES"
-                                                      print "now connected"
                                                       serverHandshake m currentHandshake
                                                     _ -> pure $ ServerError "Failed to connect"
                               Echo -> do
@@ -297,7 +314,7 @@ type AESKeyBytes = ByteString
 data ClientState =
                  Fail String
                  | ConnectionRequest
-                 | SendSharedAES
+                 | HandShakeStart EncryptionMethod
                  -- No encryption send
                  | SendHello EncryptionMethod
 
@@ -311,19 +328,19 @@ clientDispatcher :: ClientModel -> ClientState -> IO ClientState
 clientDispatcher m state = do
   result <- clientDispatch m state
   case result of
-    Fail e -> pure $ Fail e
-    SendSharedAES -> do
+    HandShakeStart _ -> do
         te <- getCPUTime
         let diff = fromIntegral (te  - lastTime m) / 1000000
-        _ <- printf "Starting handshake took: %0.3f msec\n" (diff :: Double)
+        _ <- printf "Handshake started in: %0.3f msec\n" (diff :: Double)
         ts <- getCPUTime
         clientDispatcher ClientModel{ clientKeys = clientKeys m
                                     , serverKey = serverKey m
                                     , soc = soc m
                                     , lastTime = ts}
-                           result
+              result
 
-    SendHello meth -> waitAndRunAgain result
+    SendHello _ -> waitAndRunAgain result
+    Fail e -> pure $ Fail e
     _ -> clientDispatcher m result
     where waitAndRunAgain result = do
                 te <- getCPUTime
@@ -346,7 +363,6 @@ receiveAESEcryptedMessage model aesKey = do
 
 sendPublicKeyWithAES :: ClientModel -> ByteString -> IO ()
 sendPublicKeyWithAES model aesKey = do
-  print "sending message"
   (_, ivbuf) <- keys
   cyphertext <- aesEncrypt aesKey ivbuf (serialize (fst (clientKeys model)))
   sendAll (soc model) cyphertext
@@ -356,9 +372,8 @@ recieveRandomNumber model = do
   em <- recv (soc model) maxPacketSize
   attemptedDeycrpt <- decryptSafer (snd (clientKeys model)) em
   case attemptedDeycrpt of
-    Left e -> undefined
+    Left _ -> undefined
     Right msg -> do
-      C.putStrLn $ "Received Random Number: " <> msg
       pure msg
 
 echoRandomNumber :: ClientModel -> Plaintext -> IO ()
@@ -424,6 +439,7 @@ clientDispatch model cs = case cs of
                       Fail errorMsg -> do
                           print errorMsg
                           pure $ Fail errorMsg
+                      HandShakeStart m -> clientHandshake model m
                       ConnectionRequest -> do
                         e <- myencrypt (serverKey model) "Connect?"
                         sendAll (soc model) e
@@ -431,10 +447,8 @@ clientDispatch model cs = case cs of
                         case confirmation of
                           "YES" -> do
                             putStrLn "Connected at last"
-                            clientHandshake model currentHandshake
+                            pure $ HandShakeStart currentHandshake
                           _ -> pure $ Fail "Failed To Get Confirmation"
-
-                      SendSharedAES -> sendUsingAES model
 
                       SendHello meth -> sendHello model meth
 
@@ -469,14 +483,7 @@ serialize pub = C.pack (show pub)
 deserialize :: ByteString -> PublicKey
 deserialize pub = read (C.unpack pub)
 
-test = do
-  (pub, _) <- RSA.generate size expt
-  let s = serialize pub
-      d = deserialize s
-  unless (pub == d) (putStrLn "FAIL!! could not serialize proper")
-
 --- CLI arguments ---
-
 -- Server usage
 parse :: [[Char]] -> IO ()
 parse ["server", _ , "-p", port] = server kport port >> exitSuccess
@@ -505,7 +512,6 @@ version = putStrLn "p2p version 0.1"
 
 
 --- The ugly part of the backends
-
 
 -- from the "network-run" package.
 runTCPServer :: Maybe HostName -> ServiceName -> (Socket -> IO a) -> IO a
