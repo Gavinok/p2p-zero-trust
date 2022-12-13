@@ -63,7 +63,7 @@ expt :: Integer
 expt = 65537
 
 currentHandshake :: EncryptionMethod
-currentHandshake = OneWayRSA
+currentHandshake = TwoWayRSA
 
 type Plaintext = ByteString
 type Ciphertext = ByteString
@@ -389,7 +389,7 @@ sendUsingAES model = do
   sendPublicKeyWithAES model aesKey
   msg <- recieveRandomNumber model
   echoRandomNumber model msg
-  pure $ SendHello $ AES (Just aesKey)
+  sendHello model $ AES (Just aesKey)
 
 sendHello :: ClientModel -> EncryptionMethod -> IO ClientState
 sendHello model (AES (Just aesKey)) = do
@@ -422,7 +422,6 @@ sendHello model OneWayRSA = do
 
 -- Public key iteration 2
 sendHello model TwoWayRSA = do
-  print "sending message"
  -- Send my public key
   emsg <- myencrypt (serverKey model) "hello"
   sendAll (soc model) emsg
