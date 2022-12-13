@@ -3,7 +3,7 @@ module Main where
 -- Echo server program
 import Control.Concurrent (forkFinally, threadDelay, forkIO)
 import qualified Control.Exception as E
-import Control.Monad (unless, forever, void)
+import Control.Monad (forever, void)
 import qualified Data.ByteString as S
 import Network.Socket
     ( setCloseOnExecIfNeeded,
@@ -62,9 +62,58 @@ size = 512
 expt :: Integer
 expt = 65537
 
+--- Modularity Of Different Iterations ---
+
+-- The current iteration being testd
 currentHandshake :: EncryptionMethod
 currentHandshake = TwoWayRSA
 
+--- Server Path being followed
+serverHandshake :: ServerModel -> EncryptionMethod -> IO ServerState
+serverHandshake model NoEncryption  = do
+  msg <- recv (s model) maxPacketSize
+  sendAll (s model) msg
+  pure Echo
+serverHandshake model OneWayRSA = echoOneWayEncrypt model
+serverHandshake model TwoWayRSA = echoTwoWayEncrypt model
+serverHandshake model (AES _)  = awaitSharedAES model
+
+--- Client path being followed
+clientHandshake :: ClientModel -> EncryptionMethod -> IO ClientState
+clientHandshake model NoEncryption  = sendHello model NoEncryption
+clientHandshake model OneWayRSA = sendHello model OneWayRSA
+clientHandshake model TwoWayRSA = do
+  sendAll (soc model) $ serialize (fst (clientKeys model))
+  sendHello model TwoWayRSA
+clientHandshake model (AES _)  = sendUsingAES model
+
+
+-- RSA encryption support ---
+keys :: MonadRandom m => m (ByteString, ByteString)
+keys = do
+  ekey <- genRandomBytes 32
+  ivBytes <- genRandomBytes 16
+  pure (ekey, ivBytes)
+
+mydecrypt :: MonadRandom m => PrivateKey -> ByteString -> m ByteString
+mydecrypt pk msg = do d <- decryptSafer pk msg
+                      pure $ case d of
+                               Left _ ->  "fail d" :: ByteString
+                               Right b -> b
+
+myencrypt :: MonadRandom m => PublicKey -> ByteString -> m ByteString
+myencrypt pk msg = do d <- PKCS15.encrypt pk msg
+                      pure $ case d of
+                               Left _ ->  "fail e" :: ByteString
+                               Right b -> b
+
+serialize :: PublicKey -> ByteString
+serialize pub = C.pack (show pub)
+
+deserialize :: ByteString -> PublicKey
+deserialize pub = read (C.unpack pub)
+
+-- AES encryption support ---
 type Plaintext = ByteString
 type Ciphertext = ByteString
 type AESEncryptionKey = ByteString
@@ -100,28 +149,9 @@ aesDecrypt ekey ciphertext = do
     Nothing -> pure "fail"
     Just iv -> pure $ fromMaybe "failed padding" (unpadPKCS7 $ cbcDecrypt aes iv dat)
 
-keys :: MonadRandom m => m (ByteString, ByteString)
-keys = do
-  ekey <- genRandomBytes 32
-  ivBytes <- genRandomBytes 16
-  pure (ekey, ivBytes)
-
-mydecrypt :: MonadRandom m => PrivateKey -> ByteString -> m ByteString
-mydecrypt pk msg = do d <- decryptSafer pk msg
-                      pure $ case d of
-                               Left _ ->  "fail d" :: ByteString
-                               Right b -> b
-
-myencrypt :: MonadRandom m => PublicKey -> ByteString -> m ByteString
-myencrypt pk msg = do d <- PKCS15.encrypt pk msg
-                      pure $ case d of
-                               Left _ ->  "fail e" :: ByteString
-                               Right b -> b
-
 genAndSendAESKey :: Socket -> PublicKey -> IO AESKeyBytes
 genAndSendAESKey socket recipientPubKey = do
                         (aesKey, _) <- keys
-                        -- cyphertext <- aesEncrypt aesKey ivbuf "Hello"
                         emsg <- myencrypt recipientPubKey aesKey
                         sendAll socket emsg
                         pure aesKey
@@ -154,25 +184,6 @@ data EncryptionMethod = NoEncryption
                       | AES (Maybe AESKeyBytes)
                       | OneWayRSA
                       | TwoWayRSA
-
-serverHandshake :: ServerModel -> EncryptionMethod -> IO ServerState
-serverHandshake model NoEncryption  = do
-  msg <- recv (s model) maxPacketSize
-  sendAll (s model) msg
-  pure Echo
-
-serverHandshake model OneWayRSA = echoOneWayEncrypt model
-serverHandshake model TwoWayRSA = echoTwoWayEncrypt model
-serverHandshake model (AES _)  = awaitSharedAES model
-
-clientHandshake :: ClientModel -> EncryptionMethod -> IO ClientState
-clientHandshake model NoEncryption  = sendHello model NoEncryption
-clientHandshake model OneWayRSA = sendHello model OneWayRSA
-clientHandshake model TwoWayRSA = do
-  sendAll (soc model) $ serialize (fst (clientKeys model))
-  sendHello model TwoWayRSA
-clientHandshake model (AES _)  = sendUsingAES model
-
 
 -- Final
 awaitSharedAES :: ServerModel -> IO ServerState
@@ -248,6 +259,7 @@ echoTwoWayEncrypt model = do
                                           echoWithCpub cpub
 
 
+--- Server code sed for dispatching against the current Finite State
 mainServerDispatch :: ServerModel -> ServerState -> IO ServerState
 mainServerDispatch m state = case state of
                               ServerError e -> do print e
@@ -274,8 +286,7 @@ serverDispatcher m state = do
     ServerError e -> pure $ ServerError e
     _ -> serverDispatcher m result
 
--- Server iterface which will use the public key of the client to
--- encrypt a message in this case "hello"
+-- Main thread server interfaced with by the client other than the initial public key request
 mainServer :: ServiceName -> PrivateKey -> IO ()
 mainServer port priv =  do
   putStrLn ("Listening on " ++ port)
@@ -289,16 +300,16 @@ mainServer port priv =  do
             Echo -> putStrLn "impossible"
             ServerError e -> print e
 
-
+--- Server hosting the current public key
 keyServer :: ServiceName -> PublicKey -> IO ()
 keyServer port pub = do
     putStrLn ("Key served on " ++ port)
     runTCPServer Nothing port talk
       where
-        talk s = do
-                _ <- recv s maxPacketSize
-                sendAll s $ serialize pub
-                talk s
+        talk talksocket = do
+                _ <- recv talksocket maxPacketSize
+                sendAll talksocket $ serialize pub
+                talk talksocket
 
 server :: ServiceName -> ServiceName -> IO ()
 server keyPort connectionPort = do
@@ -324,6 +335,7 @@ data ClientModel = ClientModel { clientKeys :: (PublicKey, PrivateKey)
                                , lastTime :: Integer
                                }
 
+-- Used to monitor the state of the client and keep a tally of the current time 
 clientDispatcher :: ClientModel -> ClientState -> IO ClientState
 clientDispatcher m state = do
   result <- clientDispatch m state
@@ -353,6 +365,45 @@ clientDispatcher m state = do
                                             , soc = soc m
                                             , lastTime = ts}
                            result
+
+clientDispatch :: ClientModel -> ClientState -> IO ClientState
+clientDispatch model cs = case cs of
+                      Fail errorMsg -> do
+                          print errorMsg
+                          pure $ Fail errorMsg
+                      HandShakeStart m -> clientHandshake model m
+                      ConnectionRequest -> do
+                        e <- myencrypt (serverKey model) "Connect?"
+                        sendAll (soc model) e
+                        confirmation <- recv (soc model) maxPacketSize
+                        case confirmation of
+                          "YES" -> do
+                            putStrLn "Connected at last"
+                            pure $ HandShakeStart currentHandshake
+                          _ -> pure $ Fail "Failed To Get Confirmation"
+
+                      SendHello meth -> sendHello model meth
+
+
+client :: HostName -> ServiceName -> IO ()
+client host port = do
+    runTCPClient host kport $ \s -> do
+                     sendAll s "find"
+                     spubBytes <- recv s maxPacketSize
+                     let spub = deserialize spubBytes
+                     print spub
+                     runTCPClient host port $ \s -> do
+                                      (pub, priv) <- RSA.generate size expt
+                                      t <- getCPUTime
+                                      res <- clientDispatcher ClientModel{ clientKeys = (pub, priv)
+                                                                         , serverKey = spub
+                                                                         , soc = s
+                                                                         , lastTime = t
+                                                                         }
+                                             ConnectionRequest
+                                      case res of
+                                        Fail e -> print e
+                                        _ -> pure ()
 -- Final iteration
 receiveAESEcryptedMessage :: ClientModel -> ByteString -> IO Plaintext
 receiveAESEcryptedMessage model aesKey = do
@@ -401,18 +452,19 @@ sendHello model (AES (Just aesKey)) = do
   C.putStrLn $ "Received: " <> msg
   pure $ SendHello (AES (Just aesKey))
 
-sendHello model (AES Nothing) = do
+-- Shared AES Iteration
+sendHello _ (AES Nothing) = do
   putStrLn "Must have AES to echo"
   pure $ Fail "Must have AES to echo"
 
--- Initial Iteration
+-- No Encryption Iteration
 sendHello model NoEncryption = do
   sendAll (soc model)  "hello"
   em <- recv (soc model) maxPacketSize
   C.putStrLn $ "Received: " <> em
   pure $ SendHello NoEncryption
 
--- Public key iteration 1
+-- One Way Public Key Iteration
 sendHello model OneWayRSA = do
   emsg <- myencrypt (serverKey model) "hello"
   sendAll (soc model) emsg
@@ -420,7 +472,7 @@ sendHello model OneWayRSA = do
   C.putStrLn $ "Received: " <> em
   pure $ SendHello OneWayRSA
 
--- Public key iteration 2
+-- Two Way Public Key Iteration
 sendHello model TwoWayRSA = do
  -- Send my public key
   emsg <- myencrypt (serverKey model) "hello"
@@ -433,56 +485,10 @@ sendHello model TwoWayRSA = do
       C.putStrLn $ "Received: " <> m
       pure $ SendHello TwoWayRSA
 
-clientDispatch :: ClientModel -> ClientState -> IO ClientState
-clientDispatch model cs = case cs of
-                      Fail errorMsg -> do
-                          print errorMsg
-                          pure $ Fail errorMsg
-                      HandShakeStart m -> clientHandshake model m
-                      ConnectionRequest -> do
-                        e <- myencrypt (serverKey model) "Connect?"
-                        sendAll (soc model) e
-                        confirmation <- recv (soc model) maxPacketSize
-                        case confirmation of
-                          "YES" -> do
-                            putStrLn "Connected at last"
-                            pure $ HandShakeStart currentHandshake
-                          _ -> pure $ Fail "Failed To Get Confirmation"
-
-                      SendHello meth -> sendHello model meth
-
-
-client :: HostName -> ServiceName -> IO ()
-client host port = do
-    runTCPClient host kport $ \s -> do
-                     sendAll s "find"
-                     spubBytes <- recv s maxPacketSize
-                     let spub = deserialize spubBytes
-                     print spub
-                     runTCPClient host port $ \s -> do
-                                      (pub, priv) <- RSA.generate size expt
-                                      -- putStr $ show pub
-                                      t <- getCPUTime
-                                      res <- clientDispatcher ClientModel{ clientKeys = (pub, priv)
-                                                                         , serverKey = spub
-                                                                         , soc = s
-                                                                         , lastTime = t
-                                                                         }
-                                             ConnectionRequest
-                                      case res of
-                                        Fail e -> print e
-                                        _ -> pure ()
-
+--- CLI arguments ---
 main :: IO ()
 main = getArgs >>= parse
 
-serialize :: PublicKey -> ByteString
-serialize pub = C.pack (show pub)
-
-deserialize :: ByteString -> PublicKey
-deserialize pub = read (C.unpack pub)
-
---- CLI arguments ---
 -- Server usage
 parse :: [[Char]] -> IO ()
 parse ["server", _ , "-p", port] = server kport port >> exitSuccess
@@ -508,9 +514,7 @@ usage   = putStrLn
 version :: IO ()
 version = putStrLn "p2p version 0.1"
 
-
-
---- The ugly part of the backends
+--- Backends used for the client and server ---
 
 -- from the "network-run" package.
 runTCPServer :: Maybe HostName -> ServiceName -> (Socket -> IO a) -> IO a
