@@ -31,19 +31,17 @@ genAndSendAESKey socket recipientPubKey = do
                         pure aesKey
 
 awaitForAes :: PrivateKey -> Socket -> Plaintext -> IO (Maybe C.ByteString)
-awaitForAes priv soc confirmationmessage = do
-  encryptedAesBytes <- recv soc maxPacketSize
-  attemptedDecytpiton <- decryptSafer priv encryptedAesBytes
+awaitForAes priv soc_ confirmationmessage = do
+  attemptedDecytpiton <- recv soc_ maxPacketSize >>= decryptSafer priv
   case attemptedDecytpiton of
-    Left e -> do
-      print e
-      pure Nothing
+    Left e -> print e >> pure Nothing
     Right aesBytes -> do
                    C.putStrLn aesBytes
                    putStrLn "Received and decrypted AES Key"
                    (_, ivbuf) <- keys
-                   cyphertext <- aesEncrypt aesBytes ivbuf confirmationmessage
-                   sendAll soc cyphertext
+                   aesEncrypt
+                      aesBytes ivbuf
+                      confirmationmessage >>= sendAll soc_
                    pure $ Just aesBytes
 
 data ClientState =
@@ -97,8 +95,7 @@ clientDispatch model cs = case cs of
                           pure $ Fail errorMsg
                       HandShakeStart m -> clientHandshake model m
                       ConnectionRequest -> do
-                        e <- myencrypt (serverKey model) "Connect?"
-                        sendAll (soc model) e
+                        myencrypt (serverKey model) "Connect?" >>= sendAll (soc model)
                         confirmation <- recv (soc model) maxPacketSize
                         case confirmation of
                           "YES" -> do
@@ -110,51 +107,50 @@ clientDispatch model cs = case cs of
 
 
 client :: HostName -> ServiceName -> IO ()
-client host port = do
+client host port =
     runTCPClient host kport $ \s -> do
                      sendAll s "find"
                      spubBytes <- recv s maxPacketSize
                      let spub = deserialize spubBytes
                      print spub
-                     runTCPClient host port $ \s -> do
+                     runTCPClient host port $ \s_ -> do
                                       (pub, priv) <- RSA.generate size expt
                                       t <- getCPUTime
-                                      res <- clientDispatcher ClientModel{ clientKeys = (pub, priv)
-                                                                         , serverKey = spub
-                                                                         , soc = s
-                                                                         , lastTime = t
-                                                                         }
+                                      res <- clientDispatcher
+                                                    ClientModel{ clientKeys = (pub, priv)
+                                                               , serverKey = spub
+                                                               , soc = s_
+                                                               , lastTime = t
+                                                               }
                                              ConnectionRequest
                                       case res of
                                         Fail e -> print e
                                         _ -> pure ()
 -- Final iteration
 receiveAESEcryptedMessage :: ClientModel -> C.ByteString -> IO Plaintext
-receiveAESEcryptedMessage model aesKey = do
-  em <- recv (soc model) maxPacketSize
-  msg <- aesDecrypt aesKey em
+receiveAESEcryptedMessage (ClientModel  _ _ soc_ _ ) aesKey = do
+  msg <- recv soc_ maxPacketSize >>= aesDecrypt aesKey
   C.putStrLn $ "Received: " <> msg
   pure msg
 
 sendPublicKeyWithAES :: ClientModel -> C.ByteString -> IO ()
-sendPublicKeyWithAES model aesKey = do
+sendPublicKeyWithAES (ClientModel  (cpub_ , _) _ soc_ _ ) aesKey = do
   (_, ivbuf) <- keys
-  cyphertext <- aesEncrypt aesKey ivbuf (serialize (fst (clientKeys model)))
-  sendAll (soc model) cyphertext
+  cyphertext <- aesEncrypt aesKey ivbuf $ serialize cpub_
+  sendAll soc_ cyphertext
 
 recieveRandomNumber :: ClientModel -> IO Plaintext
-recieveRandomNumber model = do
-  em <- recv (soc model) maxPacketSize
-  attemptedDeycrpt <- decryptSafer (snd (clientKeys model)) em
+recieveRandomNumber (ClientModel  (_ , cpriv_) _ soc_ _ ) = do
+  attemptedDeycrpt <- recv soc_ maxPacketSize >>= decryptSafer cpriv_
   case attemptedDeycrpt of
     Left _ -> undefined
     Right msg -> do
       pure msg
 
 echoRandomNumber :: ClientModel -> Plaintext -> IO ()
-echoRandomNumber model randnum = do
-  cyphertext <- myencrypt (serverKey model) randnum
-  sendAll (soc model) cyphertext
+echoRandomNumber (ClientModel _ serverKey_ soc_ _ ) randnum = do
+  cyphertext <- myencrypt serverKey_ randnum
+  sendAll soc_ cyphertext
   pure ()
 
 sendUsingAES :: ClientModel -> IO ClientState
@@ -162,17 +158,15 @@ sendUsingAES model = do
   aesKey <- genAndSendAESKey (soc model) (serverKey model)
   _ <- receiveAESEcryptedMessage model aesKey
   sendPublicKeyWithAES model aesKey
-  msg <- recieveRandomNumber model
-  echoRandomNumber model msg
+  recieveRandomNumber model >>= echoRandomNumber model
   sendHello model $ AES (Just aesKey)
 
 sendHello :: ClientModel -> EncryptionMethod -> IO ClientState
-sendHello model (AES (Just aesKey)) = do
+sendHello (ClientModel _ _ soc_ _ ) (AES (Just aesKey)) = do
   (_, ivbuf) <- keys
   cyphertext <- aesEncrypt aesKey ivbuf "hello"
-  sendAll (soc model) cyphertext
-  em <- recv (soc model) maxPacketSize
-  msg <- aesDecrypt aesKey em
+  sendAll soc_ cyphertext
+  msg <- recv soc_ maxPacketSize >>= aesDecrypt aesKey
   C.putStrLn $ "Received: " <> msg
   pure $ SendHello (AES (Just aesKey))
 
@@ -190,19 +184,15 @@ sendHello model NoEncryption = do
 
 -- One Way Public Key Iteration
 sendHello model OneWayRSA = do
-  emsg <- myencrypt (serverKey model) "hello"
-  sendAll (soc model) emsg
-  em <- recv (soc model) maxPacketSize
-  C.putStrLn $ "Received: " <> em
+  myencrypt (serverKey model) "hello" >>= sendAll (soc model)
+  recv (soc model) maxPacketSize >>= C.putStrLn . mappend "Received: "
   pure $ SendHello OneWayRSA
 
 -- Two Way Public Key Iteration
-sendHello model TwoWayRSA = do
+sendHello  (ClientModel (_, cpriv) spub_ soc_ _) TwoWayRSA = do
  -- Send my public key
-  emsg <- myencrypt (serverKey model) "hello"
-  sendAll (soc model) emsg
-  em <- recv (soc model) maxPacketSize
-  attemptedDecryption <- decryptSafer (snd (clientKeys model)) em
+  myencrypt spub_ "hello" >>= sendAll soc_
+  attemptedDecryption <- recv soc_ maxPacketSize >>= decryptSafer cpriv
   case attemptedDecryption of
     Left e -> pure $ Fail (show e)
     Right m -> do

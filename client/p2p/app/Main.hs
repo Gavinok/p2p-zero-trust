@@ -64,7 +64,8 @@ awaitSharedAES :: ServerModel -> IO ServerState
 awaitSharedAES model = do
                  maybeAES <- awaitForAes (priv model) (s model) "AES is working"
                  case maybeAES of
-                   Nothing -> pure $ ServerError "Failed to decrypt the aes key"
+                   Nothing -> pure
+                               $ ServerError "Failed to decrypt the aes key"
                    Just aesKey -> awaitPublicKey model aesKey
 
 awaitPublicKey :: ServerModel -> ByteString -> IO ServerState
@@ -77,28 +78,27 @@ awaitPublicKey model aesKey = do
 
 sendRandomNumber :: ServerModel -> PublicKey -> ByteString -> IO ServerState
 sendRandomNumber model cpub aesKey = do
-                 cyphertext <- myencrypt cpub "hello"
-                 sendAll (s model) cyphertext
+                 myencrypt cpub "hello" >>= sendAll (s model)
                  awaitRandomNumber model aesKey "hello"
 
 awaitRandomNumber :: ServerModel -> ByteString -> ByteString -> IO ServerState
-awaitRandomNumber model aesKey ognum = do
-                 em <- recv (s model) maxPacketSize
-                 msg <- decryptSafer (priv model) em
+awaitRandomNumber (ServerModel priv_ s_) aesKey ognum = do
+                 msg <- recv s_ maxPacketSize >>= decryptSafer priv_
                  case msg of
                    Left e -> pure $ ServerError (show e)
                    Right randnum -> do
-                                    C.putStrLn $ "Received Random Number: " <> randnum
-                                    if randnum == ognum then
-                                        do putStrLn "numbers did match"
-                                           aESEcho model aesKey
-                                    else do putStrLn "numbers did NOT match"
-                                            pure $ ServerError "Random numbers did not match"
+                            C.putStrLn $ "Received Random Number: " <> randnum
+                            if randnum == ognum then
+                                do putStrLn "numbers did match"
+                                   aESEcho (ServerModel priv_ s_) aesKey
+                            else
+                                do putStrLn "numbers did NOT match"
+                                   pure
+                                    $ ServerError "Random numbers did not match"
 
 aESEcho :: ServerModel -> ByteString -> IO ServerState
 aESEcho model aesKey = do
-                 em <- recv (s model) maxPacketSize
-                 msg <- aesDecrypt aesKey em
+                 msg <- recv (s model) maxPacketSize >>= aesDecrypt aesKey
                  (_, ivbuf) <- keys
                  cyphertext <- aesEncrypt aesKey ivbuf msg
                  sendAll (s model) cyphertext
@@ -107,51 +107,49 @@ aESEcho model aesKey = do
 -- Nothing needed since Echo works out of the box
 -- One Way RSA
 echoOneWayEncrypt :: ServerModel -> IO ServerState
-echoOneWayEncrypt model = do
-                 ehello <- recv (s model) maxPacketSize
-                 dhello <- decryptSafer (priv model) ehello
+echoOneWayEncrypt (ServerModel priv_ s_) = do
+                 dhello <- recv s_ maxPacketSize >>= decryptSafer priv_
                  case dhello of
                    Left e -> pure $ ServerError (show e)
                    Right hello -> do
-                               sendAll (s model) hello
-                               echoOneWayEncrypt model
+                               sendAll s_ hello
+                               echoOneWayEncrypt
+                                  $ ServerModel priv_ s_
 -- Two Way RSA
 echoTwoWayEncrypt :: ServerModel -> IO ServerState
-echoTwoWayEncrypt model = do
+echoTwoWayEncrypt (ServerModel priv_ s_) = do
                  -- Wait for the client to provide thier public key
-                 scpub <- recv (s model) maxPacketSize
+                 scpub <- recv s_ maxPacketSize
                  let cpub = deserialize scpub
                  echoWithCpub cpub
                  where echoWithCpub cpub = do
-                            ehello <- recv (s model) maxPacketSize
-                            dhello <- decryptSafer (priv model) ehello
+                            dhello <- recv s_ maxPacketSize >>= decryptSafer priv_
                             case dhello of
                               Left e -> pure $ ServerError (show e)
                               Right hello -> do
-                                          newehello <- myencrypt cpub hello
-                                          sendAll (s model) newehello
+                                          myencrypt cpub hello >>= sendAll s_
                                           echoWithCpub cpub
 
 
 --- Server code sed for dispatching against the current Finite State
 mainServerDispatch :: ServerModel -> ServerState -> IO ServerState
-mainServerDispatch m state = case state of
-                              ServerError e -> do print e
-                                                  pure $ ServerError e
-                              WaitForConnection -> do
-                                     msg <- recv (s m) maxPacketSize
-                                     decr <- decryptSafer (priv m) msg
-                                     case decr of
-                                       Left _ -> pure $ ServerError "Failed to decrypt"
-                                       Right r -> case C.unpack r of
-                                                    "Connect?" -> do
-                                                      sendAll (s m) "YES"
-                                                      serverHandshake m currentHandshake
-                                                    _ -> pure $ ServerError "Failed to connect"
-                              Echo -> do
-                                msg <- recv (s m) maxPacketSize
-                                sendAll (s m) msg
-                                pure Echo
+mainServerDispatch m state =
+    case state of
+      ServerError e -> do print e
+                          pure $ ServerError e
+      WaitForConnection -> do
+                 msg <- recv (s m) maxPacketSize >>= decryptSafer (priv m)
+                 case msg of
+                   Left _ -> pure $ ServerError "Failed to decrypt"
+                   Right r -> case C.unpack r of
+                                "Connect?" -> do
+                                  sendAll (s m) "YES"
+                                  serverHandshake m currentHandshake
+                                _ -> pure
+                                     $ ServerError "Failed to connect"
+      Echo -> do
+        recv (s m) maxPacketSize >>= sendAll (s m)
+        pure Echo
 
 serverDispatcher :: ServerModel -> ServerState -> IO ServerState
 serverDispatcher m state = do
@@ -160,15 +158,16 @@ serverDispatcher m state = do
     ServerError e -> pure $ ServerError e
     _ -> serverDispatcher m result
 
--- Main thread server interfaced with by the client other than the initial public key request
+-- Main thread server interfaced with by the client other than the
+-- initial public key request
 mainServer :: ServiceName -> PrivateKey -> IO ()
-mainServer port priv =  do
+mainServer port priv_ =  do
   putStrLn ("Listening on " ++ port)
   runTCPServer Nothing port talk
       where
-        talk s = do
-          res <- serverDispatcher ServerModel{ s = s
-                                             , priv = priv}
+        talk s_ = do
+          res <- serverDispatcher ServerModel{ s = s_
+                                             , priv = priv_}
                  WaitForConnection
           case res of
             Echo -> putStrLn "impossible"
@@ -190,8 +189,6 @@ server keyPort connectionPort = do
    (public, private) <- RSA.generate size expt
    _ <- forkIO $ keyServer keyPort public
    mainServer connectionPort private
-
-
 
 --- CLI arguments ---
 main :: IO ()
