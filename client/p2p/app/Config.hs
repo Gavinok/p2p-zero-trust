@@ -1,9 +1,11 @@
 module Config (maxPacketSize, currentHandshake, kport, size, expt, fallbackPort) where
+
 import Encryption
-import Network.Socket ( ServiceName)
+import Network.Socket (ServiceName)
 
 maxPacketSize :: Int
 maxPacketSize = 1024 * 7
+
 -- The current iteration being testd
 currentHandshake :: EncryptionMethod
 currentHandshake = TwoWayRSA
