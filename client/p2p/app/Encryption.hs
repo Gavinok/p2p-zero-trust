@@ -39,10 +39,6 @@ type Ciphertext = ByteString
 
 type AESKeyBytes = ByteString
 
-genRandomBytes :: (MonadRandom m) => Int -> m ByteString
-genRandomBytes size = do
-    getRandomBytes size
-
 initAES256 :: ByteString -> IO AES256
 initAES256 = throwCryptoErrorIO . cipherInit
 
@@ -72,10 +68,7 @@ aesDecrypt ekey ciphertext = do
 
 -- RSA encryption support ---
 keys :: MonadRandom m => m (ByteString, ByteString)
-keys = do
-    ekey <- genRandomBytes 32
-    ivBytes <- genRandomBytes 16
-    pure (ekey, ivBytes)
+keys = ( , ) <$> getRandomBytes 32 <*>  getRandomBytes 16
 
 mydecrypt :: MonadRandom m => PrivateKey -> ByteString -> m ByteString
 mydecrypt pk msg = do

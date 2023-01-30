@@ -86,7 +86,9 @@ clientDispatcher m state = do
   where
     waitAndRunAgain result = do
         te <- getCPUTime
-        let diff = fromIntegral (te - lastTime m) / ((10 ^ 10) :: Double)
+        let denom = (fromIntegral (10 :: Integer) ^ (10 :: Integer))
+            diff :: Double
+            diff = (fromIntegral (te - lastTime m)) / denom
         _ <- printf "Computation took: %0.3f msec\n" (diff :: Double)
         threadDelay 3000000
         ts <- getCPUTime

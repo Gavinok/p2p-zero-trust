@@ -44,9 +44,8 @@ import System.Exit (exitFailure, exitSuccess)
 
 --- Server Path being followed
 serverHandshake :: ServerModel -> EncryptionMethod -> IO ServerState
-serverHandshake model NoEncryption = do
-    msg <- recv (s model) maxPacketSize
-    sendAll (s model) msg
+serverHandshake (ServerModel _ s_) NoEncryption = do
+    recv s_ maxPacketSize >>= sendAll s_
     pure Echo
 serverHandshake model OneWayRSA = echoOneWayEncrypt model
 serverHandshake model TwoWayRSA = echoTwoWayEncrypt model
@@ -76,8 +75,7 @@ awaitPublicKey :: ServerModel -> ByteString -> IO ServerState
 awaitPublicKey model aesKey = do
     cpub <- recv (s model) maxPacketSize
     C.putStrLn cpub
-    fullPub <- aesDecrypt aesKey cpub
-    let truPub = deserialize fullPub
+    truPub <- deserialize <$> aesDecrypt aesKey cpub
     sendRandomNumber model truPub aesKey
 
 sendRandomNumber :: ServerModel -> PublicKey -> ByteString -> IO ServerState
@@ -183,8 +181,8 @@ mainServer port priv_ = do
                     }
                 WaitForConnection
         case res of
-            Echo -> putStrLn "impossible"
             ServerError e -> print e
+            _ -> putStrLn "Impossible State"
 
 --- Server hosting the current public key
 keyServer :: ServiceName -> PublicKey -> IO ()
